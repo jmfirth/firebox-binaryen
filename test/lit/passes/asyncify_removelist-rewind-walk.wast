@@ -1,5 +1,5 @@
-;; firebox #431: regression test for symmetric (Normal || Rewinding) rewind
-;; passthrough at off-chain call sites inside instrumented functions.
+;; firebox #431: regression test for rewind passthrough at off-chain call
+;; sites inside instrumented functions.
 ;;
 ;; The canonical Ruby `main+0x1599a` pattern: a caller that is on-chain
 ;; (because it calls some chain-changing import) ALSO contains a call to
@@ -8,15 +8,18 @@
 ;; passthrough — the rewind walker would fall past the body and hit a
 ;; trailing `unreachable` barrier emitted by AsyncifyLocals.
 ;;
-;; Post-#431 the wrapper is `if (state == Normal || state == Rewinding) { call }`
-;; — mirroring the existing `Iff` handler's rewind passthrough idiom at
-;; Asyncify.cpp lines 1119-1152.
+;; The first Shape B-PROPER attempt (predecessor) emitted
+;; `if (state == Normal || state == Rewinding) { call }` — symmetric in
+;; structure but semantically WRONG: it re-executes the call body on
+;; rewind, which accesses uninitialized prologue locals.
 ;;
-;; The check is intentionally minimal: a CHECK looking for `(call $offchain_callee)`
-;; preceded — within the same function — by an `(i32.or` that pairs
-;; state==0 and state==2. CHECK-LABEL anchors us inside $caller; CHECK-NOT
-;; before the call site asserts there is no asymmetric Normal-only wrapper
-;; for the offchain call.
+;; Shape B-PROPER-3 (this fix) emits a hybrid `if/else`:
+;; `if (state == Normal) { call } else { /* empty */ }`. The empty else
+;; gives the walker an unconditional path past the call site without
+;; re-executing it, while preserving prologue-state isolation.
+;;
+;; The check asserts the new shape: an `if` over `state==Normal` whose
+;; `then` contains the call and whose `else` is an empty block.
 
 ;; RUN: foreach %s %t wasm-opt --asyncify \
 ;; RUN:   --pass-arg=asyncify-imports@env.unwinding_import \
@@ -41,20 +44,18 @@
   ;; `$offchain_callee`. This is the Ruby `main` pattern: an instrumented
   ;; function with mixed on-chain + off-chain call sites.
   ;;
-  ;; The off-chain call site MUST have a symmetric (Normal || Rewinding)
-  ;; wrapper — that is the heart of the #431 fix.
+  ;; The off-chain call site MUST have a Normal-only `then` with an empty
+  ;; `else` so the rewind walker advances past without re-executing.
   (func $caller (export "caller")
     (call $offchain_callee)
     (call $onchain_callee))
 )
 
 ;; CHECK-LABEL: (func $caller
-;; Symmetric (Normal || Rewinding) wrapper around the off-chain call site.
-;; The (i32.or with two (i32.eq state-checks must appear, AND the (call
-;; $offchain_callee) must appear after it in the same function.
-;; CHECK:       (i32.or
-;; CHECK-NEXT:    (i32.eq
-;; CHECK:           (i32.const 0)
-;; CHECK:         (i32.eq
-;; CHECK:           (i32.const 2)
-;; CHECK:       (call $offchain_callee)
+;; The off-chain call site uses the hybrid `if(state==Normal) (then call)
+;; (else empty)` shape. The (call $offchain_callee) MUST be immediately
+;; followed by an (else) clause. CHECK-NEXT enforces adjacency.
+;; CHECK:        (call $offchain_callee)
+;; CHECK-NEXT:   )
+;; CHECK-NEXT:   (else
+;; CHECK-NEXT:   )

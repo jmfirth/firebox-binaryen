@@ -1222,18 +1222,32 @@ private:
     return builder->makeIf(builder->makeStateCheck(State::Normal), curr);
   }
 
-  // firebox #431: Possibly skip code on rewind, but pass through if the
-  // rewind walker needs to advance past a call site that already executed on
-  // the unwind side. Emits `if (state == Normal || state == Rewinding) { curr }`.
-  // Used in place of `makeMaybeSkip` for off-chain call sites inside
-  // instrumented functions. The structural template is the same one used by
-  // the `Iff` handler's rewind passthrough at lines 1119-1152.
+  // firebox #431: Pass the rewind walker through an off-chain call site
+  // inside an instrumented function. On Normal, execute the call body. On
+  // Rewinding, enter an empty `else` block so the walker advances past the
+  // call site WITHOUT re-executing it.
+  //
+  // The naive shape (used by the predecessor Shape B-PROPER patch) was
+  // `if (state == Normal || state == Rewinding) { curr }`. That structure
+  // re-executes `curr` on rewind, which is unsafe: the rewound frame's
+  // prologue (stack-pointer adjustment, local stores) is skipped on rewind
+  // by AsyncifyLocals' instrumentation, so any `local.get` inside `curr`
+  // resolves to a default-zero value instead of the saved prologue state.
+  // For Ruby's `main`, re-executing the `rb_wasm_rt_start` call body on
+  // rewind reads `local 2` as 0 and constructs wild pointers into linear
+  // memory — empirically traps OR corrupts saved Ruby-runtime state. See
+  // work/tracks/ruby/reports/2026-05-19-431-shape-b-proper-result.md.
+  //
+  // The hybrid `if/else` shape: on Normal the call executes; on Rewinding
+  // the walker enters the (empty) else and falls through to the next
+  // sibling expression. This satisfies the walker's "must descend into the
+  // if body" invariant without the side effects of re-execution, and it
+  // mirrors the `Iff` handler's structural intent — give the rewind walker
+  // an unconditional path past the site.
   Expression* makeRewindPassThroughCall(Expression* curr) {
+    auto* emptyElse = builder->makeBlock();
     return builder->makeIf(
-      builder->makeBinary(OrInt32,
-                          builder->makeStateCheck(State::Normal),
-                          builder->makeStateCheck(State::Rewinding)),
-      curr);
+      builder->makeStateCheck(State::Normal), curr, emptyElse);
   }
 
   // firebox #431: Walk a subtree looking for a Call/CallIndirect (recursively)
