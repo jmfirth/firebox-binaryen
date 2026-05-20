@@ -1043,7 +1043,25 @@ private:
       auto phase = item.phase;
 
       if (phase == Work::Scan && !analyzer->canChangeState(curr, func)) {
-        results.push_back(makeMaybeSkip(curr));
+        // firebox #431: Discriminate "call to off-chain function" from "pure
+        // non-state-changing expression". For pure code (memory stores,
+        // arithmetic, etc.) the existing `if (state == Normal) { curr }` skip
+        // is CORRECT — re-running side effects on the rewind walk would
+        // corrupt program state. For a call site inside an instrumented
+        // function (the enclosing func is on the chain via SOME other call,
+        // even though THIS callee is off-chain — e.g. on the removelist), the
+        // rewind walker MUST advance past the call site idempotently to reach
+        // the on-chain call sites deeper in the function body. The old
+        // emission (`makeMaybeSkip`) traps the rewind walk on whatever
+        // trailing `unreachable` follows the wrapped statement (Ruby's
+        // `main+0x1599a`). Mirror the existing `Iff` handler's rewind
+        // passthrough idiom (lines 1119-1152): wrap with
+        // `if (state == Normal || state == Rewinding) { curr }`.
+        if (containsCallToOffChainFunction(curr)) {
+          results.push_back(makeRewindPassThroughCall(curr));
+        } else {
+          results.push_back(makeMaybeSkip(curr));
+        }
         continue;
       }
 
@@ -1078,15 +1096,26 @@ private:
             }
             // We have a range of [begin, i] in which the state cannot change,
             // so all we need to do is skip it if rewinding.
+            // firebox #431: but if any element in the range contains a Call
+            // to an off-chain function, the rewind walker must pass through
+            // — emit the symmetric `(Normal || Rewinding)` wrapper instead.
             if (begin == i) {
-              list[i] = makeMaybeSkip(list[i]);
+              if (containsCallToOffChainFunction(list[i])) {
+                list[i] = makeRewindPassThroughCall(list[i]);
+              } else {
+                list[i] = makeMaybeSkip(list[i]);
+              }
             } else {
               auto* block = builder->makeBlock();
               for (auto j = begin; j <= i; j++) {
                 block->list.push_back(list[j]);
               }
               block->finalize();
-              list[begin] = makeMaybeSkip(block);
+              if (containsCallToOffChainFunction(block)) {
+                list[begin] = makeRewindPassThroughCall(block);
+              } else {
+                list[begin] = makeMaybeSkip(block);
+              }
               for (auto j = begin + 1; j <= i; j++) {
                 list[j] = builder->makeNop();
               }
@@ -1191,6 +1220,39 @@ private:
   // Possibly skip some code, if rewinding.
   Expression* makeMaybeSkip(Expression* curr) {
     return builder->makeIf(builder->makeStateCheck(State::Normal), curr);
+  }
+
+  // firebox #431: Possibly skip code on rewind, but pass through if the
+  // rewind walker needs to advance past a call site that already executed on
+  // the unwind side. Emits `if (state == Normal || state == Rewinding) { curr }`.
+  // Used in place of `makeMaybeSkip` for off-chain call sites inside
+  // instrumented functions. The structural template is the same one used by
+  // the `Iff` handler's rewind passthrough at lines 1119-1152.
+  Expression* makeRewindPassThroughCall(Expression* curr) {
+    return builder->makeIf(
+      builder->makeBinary(OrInt32,
+                          builder->makeStateCheck(State::Normal),
+                          builder->makeStateCheck(State::Rewinding)),
+      curr);
+  }
+
+  // firebox #431: Walk a subtree looking for a Call/CallIndirect (recursively)
+  // — the exact discriminator for "the rewind walker must pass through this
+  // on its way to the on-chain call sites deeper in the enclosing function
+  // body". `analyzer->canChangeState(curr, func)` already returned false for
+  // `curr` (we are in the `!canChangeState` branch), so any Call/CallIndirect
+  // inside `curr` is necessarily to an off-chain target (either on the
+  // removelist or trivially non-chain-changing). We just need to detect
+  // whether there is one.
+  bool containsCallToOffChainFunction(Expression* curr) {
+    struct CallWalker : PostWalker<CallWalker> {
+      bool hasCall = false;
+      void visitCall(Call* c) { hasCall = true; }
+      void visitCallIndirect(CallIndirect* c) { hasCall = true; }
+    };
+    CallWalker w;
+    w.walk(curr);
+    return w.hasCall;
   }
 
   Expression* makeCallSupport(Expression* curr) {
