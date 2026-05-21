@@ -119,15 +119,9 @@
   ;; CHECK-NEXT:      )
   ;; CHECK-NEXT:      (block
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $stuff)
@@ -160,15 +154,9 @@
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:       )
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $stuff)
@@ -1520,15 +1508,9 @@
   ;; CHECK-NEXT:      )
   ;; CHECK-NEXT:      (block
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $boring)
@@ -1561,15 +1543,9 @@
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:       )
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $boring)
@@ -1677,15 +1653,9 @@
   ;; CHECK-NEXT:      )
   ;; CHECK-NEXT:      (block
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $boring-deep)
@@ -1718,15 +1688,9 @@
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:       )
   ;; CHECK-NEXT:       (if
-  ;; CHECK-NEXT:        (i32.or
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 0)
-  ;; CHECK-NEXT:         )
-  ;; CHECK-NEXT:         (i32.eq
-  ;; CHECK-NEXT:          (global.get $__asyncify_state)
-  ;; CHECK-NEXT:          (i32.const 2)
-  ;; CHECK-NEXT:         )
+  ;; CHECK-NEXT:        (i32.eq
+  ;; CHECK-NEXT:         (global.get $__asyncify_state)
+  ;; CHECK-NEXT:         (i32.const 0)
   ;; CHECK-NEXT:        )
   ;; CHECK-NEXT:        (then
   ;; CHECK-NEXT:         (call $boring)

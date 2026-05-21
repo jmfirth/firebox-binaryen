@@ -859,6 +859,59 @@ public:
     return walker.canChangeState && !walker.isBottomMostRuntime;
   }
 
+  // firebox #431: Returns true if `curr` contains a direct call to a function
+  // on the asyncify remove-list.
+  //
+  // A remove-listed callee has `canChangeState == false` by fiat (see line
+  // ~692) — the analyzer is *told* to treat it as off-chain. But "off-chain
+  // by fiat" is not the same as "genuinely cannot unwind": a remove-listed
+  // function may still, at runtime, transitively reach an unwinding import
+  // (Ruby's `rb_wasm_rt_start` is the canonical case — it is remove-listed so
+  // it owns its own asyncify-Fiber state machine, yet its descendants DO
+  // unwind through wasix imports). The remove-list severs the *analyzer's*
+  // transitive view, not the *runtime's* control flow.
+  //
+  // The consequence: a call site to a remove-listed function inside an
+  // instrumented (on-chain) caller is a real unwind/rewind boundary. It needs
+  // the same per-call-site `call_index` accounting (`noteUnwound(N)` push on
+  // unwind, `check_call_index(N)` match on rewind) that an on-chain call site
+  // gets via `makeCallSupport`. Without it, the caller's function-prelude
+  // `callIndexPop` pops a value the caller never pushed — the rewind buffer
+  // desyncs. See AsyncifyFlow::process and makeCallSupport.
+  //
+  // This is distinct from a *genuinely* off-chain call (e.g. a call to an
+  // empty leaf, or to `printf`): such a callee can never unwind, so the
+  // caller can never unwind through it, so no `call_index` accounting is
+  // needed and the cheaper `if (state == Normal)` skip remains correct. Only
+  // remove-listed callees get the upgrade — which keeps the pass a no-op for
+  // programs that do not use `--asyncify-removelist`.
+  //
+  // Only *direct* calls are considered: a remove-listed function is named on
+  // the remove-list and reached by name; an indirect call cannot select it by
+  // remove-list membership, and indirect-call state effects are already
+  // handled by canChangeState's `canIndirectChangeState` logic.
+  bool containsCallToRemovedFunction(Expression* curr) {
+    struct Walker : PostWalker<Walker> {
+      Module* module;
+      Map* map;
+      bool found = false;
+      void visitCall(Call* curr) {
+        auto* target = module->getFunctionOrNull(curr->target);
+        if (target) {
+          auto iter = map->find(target);
+          if (iter != map->end() && iter->second.inRemoveList) {
+            found = true;
+          }
+        }
+      }
+    };
+    Walker walker;
+    walker.module = &module;
+    walker.map = &map;
+    walker.walk(curr);
+    return walker.found;
+  }
+
   FakeGlobalHelper fakeGlobals;
   bool verbose;
 };
@@ -1042,26 +1095,13 @@ private:
       auto* curr = item.curr;
       auto phase = item.phase;
 
-      if (phase == Work::Scan && !analyzer->canChangeState(curr, func)) {
-        // firebox #431: Discriminate "call to off-chain function" from "pure
-        // non-state-changing expression". For pure code (memory stores,
-        // arithmetic, etc.) the existing `if (state == Normal) { curr }` skip
-        // is CORRECT — re-running side effects on the rewind walk would
-        // corrupt program state. For a call site inside an instrumented
-        // function (the enclosing func is on the chain via SOME other call,
-        // even though THIS callee is off-chain — e.g. on the removelist), the
-        // rewind walker MUST advance past the call site idempotently to reach
-        // the on-chain call sites deeper in the function body. The old
-        // emission (`makeMaybeSkip`) traps the rewind walk on whatever
-        // trailing `unreachable` follows the wrapped statement (Ruby's
-        // `main+0x1599a`). Mirror the existing `Iff` handler's rewind
-        // passthrough idiom (lines 1119-1152): wrap with
-        // `if (state == Normal || state == Rewinding) { curr }`.
-        if (containsCallToOffChainFunction(curr)) {
-          results.push_back(makeRewindPassThroughCall(curr));
-        } else {
-          results.push_back(makeMaybeSkip(curr));
-        }
+      if (phase == Work::Scan && !needsRewindAccounting(curr)) {
+        // The expression neither changes the state nor contains a call to a
+        // remove-listed function: it is pure with respect to the asyncify
+        // state machine. Skipping it wholesale on the rewind walk is correct
+        // and is the cheapest emission — re-running its side effects on the
+        // rewind walk would corrupt program state.
+        results.push_back(makeMaybeSkip(curr));
         continue;
       }
 
@@ -1076,15 +1116,21 @@ private:
           // execution order.
           for (size_t i = list.size(); i > 0; i--) {
             auto* child = list[i - 1];
-            if (analyzer->canChangeState(child, func)) {
+            // firebox #431: scan children that need rewind accounting — that
+            // is, children that change the state OR contain a call to a
+            // remove-listed function. The latter must be broken out of the
+            // non-state-changing clump so they receive a per-call-site
+            // `call_index` (see needsRewindAccounting / makeCallSupport).
+            if (needsRewindAccounting(child)) {
               work.push_back(Work{child, Work::Scan});
             }
           }
           continue;
         }
         Index i = list.size() - 1;
-        // At least one of our children may change the state. Clump them as
-        // necessary.
+        // At least one of our children needs rewind accounting. Clump the
+        // others (the pure, non-state-changing, no-remove-listed-call ones)
+        // as necessary.
         while (1) {
           if (processed.count(list[i])) {
             list[i] = results.back();
@@ -1094,28 +1140,20 @@ private:
             while (begin > 0 && !processed.count(list[begin - 1])) {
               begin--;
             }
-            // We have a range of [begin, i] in which the state cannot change,
-            // so all we need to do is skip it if rewinding.
-            // firebox #431: but if any element in the range contains a Call
-            // to an off-chain function, the rewind walker must pass through
-            // — emit the symmetric `(Normal || Rewinding)` wrapper instead.
+            // We have a range of [begin, i] that is pure with respect to the
+            // asyncify state machine (no element changes the state, and no
+            // element contains a call to a remove-listed function — those
+            // were scanned out of the clump above). So all we need to do is
+            // skip the whole range if rewinding.
             if (begin == i) {
-              if (containsCallToOffChainFunction(list[i])) {
-                list[i] = makeRewindPassThroughCall(list[i]);
-              } else {
-                list[i] = makeMaybeSkip(list[i]);
-              }
+              list[i] = makeMaybeSkip(list[i]);
             } else {
               auto* block = builder->makeBlock();
               for (auto j = begin; j <= i; j++) {
                 block->list.push_back(list[j]);
               }
               block->finalize();
-              if (containsCallToOffChainFunction(block)) {
-                list[begin] = makeRewindPassThroughCall(block);
-              } else {
-                list[begin] = makeMaybeSkip(block);
-              }
+              list[begin] = makeMaybeSkip(block);
               for (auto j = begin + 1; j <= i; j++) {
                 list[j] = builder->makeNop();
               }
@@ -1192,6 +1230,15 @@ private:
       } else if (doesCall(curr)) {
         // We reach here only in Scan phase, but we in effect "Finish" calls
         // here as well.
+        //
+        // firebox #431: a call reaches here if it changes the state OR if it
+        // targets a remove-listed function (needsRewindAccounting let it past
+        // the early-out / clump above). In BOTH cases makeCallSupport is the
+        // correct emission: it allocates a per-call-site `call_index`, pushes
+        // it on unwind (makePossibleUnwind), and matches it on rewind
+        // (makeCallIndexPeek). For a remove-listed callee whose descendants
+        // unwind at runtime, this is exactly the accounting the analyzer's
+        // (deliberately severed) transitive view fails to supply.
         results.push_back(makeCallSupport(curr));
         continue;
       } else if (auto* try_ = curr->dynCast<Try>()) {
@@ -1222,37 +1269,34 @@ private:
     return builder->makeIf(builder->makeStateCheck(State::Normal), curr);
   }
 
-  // firebox #431: Possibly skip code on rewind, but pass through if the
-  // rewind walker needs to advance past a call site that already executed on
-  // the unwind side. Emits `if (state == Normal || state == Rewinding) { curr }`.
-  // Used in place of `makeMaybeSkip` for off-chain call sites inside
-  // instrumented functions. The structural template is the same one used by
-  // the `Iff` handler's rewind passthrough at lines 1119-1152.
-  Expression* makeRewindPassThroughCall(Expression* curr) {
-    return builder->makeIf(
-      builder->makeBinary(OrInt32,
-                          builder->makeStateCheck(State::Normal),
-                          builder->makeStateCheck(State::Rewinding)),
-      curr);
-  }
-
-  // firebox #431: Walk a subtree looking for a Call/CallIndirect (recursively)
-  // — the exact discriminator for "the rewind walker must pass through this
-  // on its way to the on-chain call sites deeper in the enclosing function
-  // body". `analyzer->canChangeState(curr, func)` already returned false for
-  // `curr` (we are in the `!canChangeState` branch), so any Call/CallIndirect
-  // inside `curr` is necessarily to an off-chain target (either on the
-  // removelist or trivially non-chain-changing). We just need to detect
-  // whether there is one.
-  bool containsCallToOffChainFunction(Expression* curr) {
-    struct CallWalker : PostWalker<CallWalker> {
-      bool hasCall = false;
-      void visitCall(Call* c) { hasCall = true; }
-      void visitCallIndirect(CallIndirect* c) { hasCall = true; }
-    };
-    CallWalker w;
-    w.walk(curr);
-    return w.hasCall;
+  // firebox #431: An expression "needs rewind accounting" if the rewind
+  // walker must navigate INTO it (rather than skip past it wholesale). Two
+  // cases:
+  //
+  //   1. The expression can change the asyncify state (it reaches an
+  //      unwinding import on a path the analyzer can see). This is the
+  //      classic on-chain case.
+  //
+  //   2. The expression contains a direct call to a remove-listed function.
+  //      The analyzer was *told* to treat a remove-listed callee as off-chain
+  //      (`canChangeState` returns false), but a remove-listed function can
+  //      still unwind at runtime — Ruby's `rb_wasm_rt_start` is exactly this:
+  //      remove-listed because it owns its own asyncify-Fiber state machine,
+  //      yet its descendants DO unwind through wasix imports. The remove-list
+  //      severs the analyzer's transitive view, not the runtime's control
+  //      flow. A call site to such a function is a real unwind/rewind
+  //      boundary and must receive a per-call-site `call_index` (via
+  //      makeCallSupport) so the enclosing function's `callIndexPop` prelude
+  //      stays balanced against what its body pushed.
+  //
+  // A genuinely off-chain call (to an empty leaf, to `printf`, etc.) is NOT
+  // covered by case 2: such a callee can never unwind, so the caller can
+  // never unwind through it, so no `call_index` accounting is needed and the
+  // cheaper `makeMaybeSkip` skip remains correct. This keeps the pass a
+  // no-op for programs that do not use `--asyncify-removelist`.
+  bool needsRewindAccounting(Expression* curr) {
+    return analyzer->canChangeState(curr, func) ||
+           analyzer->containsCallToRemovedFunction(curr);
   }
 
   Expression* makeCallSupport(Expression* curr) {
