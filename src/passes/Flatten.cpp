@@ -41,6 +41,7 @@
 #include <ir/effects.h>
 #include <ir/eh-utils.h>
 #include <ir/flat.h>
+#include <ir/label-utils.h>
 #include <ir/properties.h>
 #include <ir/utils.h>
 #include <pass.h>
@@ -84,6 +85,12 @@ struct Flatten
 
   // Break values are sent through a temp local
   std::unordered_map<Name, Index> breakTemps;
+
+  // Allocates fresh, non-colliding labels in the function currently being
+  // walked. Only created if we actually need one (that is, if the function
+  // contains a try_table with a value-carrying catch clause), and dropped in
+  // visitFunction, which runs after the rest of the function has been walked.
+  std::unique_ptr<LabelUtils::LabelManager> labelManager;
 
   void visitExpression(Expression* curr) {
     std::vector<Expression*> ourPreludes;
@@ -227,6 +234,108 @@ struct Flatten
         tryy->finalize();
         replaceCurrent(rep);
 
+      } else if (auto* tryTable = curr->dynCast<TryTable>()) {
+        // Remove a try_table value, exactly as for a loop: the body's value
+        // goes to a temp local and we leave a get of it behind.
+        Expression* rep = tryTable;
+        auto* originalBody = tryTable->body;
+        auto type = tryTable->type;
+        if (type.isConcrete()) {
+          Index temp = builder.addVar(getFunction(), type);
+          if (tryTable->body->type.isConcrete()) {
+            tryTable->body = builder.makeLocalSet(temp, tryTable->body);
+          }
+          // and we leave just a get of the value
+          rep = builder.makeLocalGet(temp, type);
+        }
+        tryTable->body = getPreludesWithExpression(originalBody, tryTable->body);
+        tryTable->finalize();
+
+        // The remaining problem is the catch clauses. Unlike a legacy try,
+        // they have no bodies - they name a destination label, and the caught
+        // values (the tag's payload, plus an exnref for catch_ref/
+        // catch_all_ref) are delivered to that label implicitly, on the stack.
+        // Flat form does not allow control flow to carry values, so for each
+        // value-carrying clause we interpose a fresh block that receives those
+        // values, spills them into the destination's break temp - the very
+        // local that Flatten's Break handling uses for explicit brs to that
+        // label - and then branches to the original destination with no value.
+        // The destination block is then left with only valueless branches to
+        // it, and the existing Block handling below turns it into a
+        // none-typed block followed by a get of that same temp.
+        //
+        // For a try_table with two value-carrying clauses this produces:
+        //
+        //  (block $escape
+        //   (local.set $temp0
+        //    (block $catch0 (result ..sent0..)
+        //     (local.set $temp1
+        //      (block $catch1 (result ..sent1..)
+        //       (try_table (catch $t0 $catch0) (catch $t1 $catch1) ..body..)
+        //       (br $escape)
+        //      )
+        //     )
+        //     (br $dest1)
+        //    )
+        //   )
+        //   (br $dest0)
+        //  )
+        //
+        // A local.set whose value is a block is itself not flat, but there is
+        // no way around it: wasm delivers caught values on the stack to a
+        // labelled block, so some block must have a concrete type. We keep
+        // that block as small as legally possible, so that everything the
+        // catch actually reaches is a local.
+        bool carriesValues = false;
+        for (auto sent : tryTable->sentTypes) {
+          if (sent != Type::none) {
+            carriesValues = true;
+            break;
+          }
+        }
+        Expression* wrapped = tryTable;
+        if (carriesValues) {
+          if (!labelManager) {
+            labelManager =
+              std::make_unique<LabelUtils::LabelManager>(getFunction());
+          }
+          Name escape = labelManager->getUnique("flatten-try-table-escape$");
+          std::vector<Expression*> items = {tryTable,
+                                            builder.makeBreak(escape)};
+          // Wrap from the last clause inwards, so that the first clause ends up
+          // outermost. The order does not matter for correctness - each clause
+          // is reached only by its own catch - but it keeps the output
+          // readable.
+          for (Index i = tryTable->catchDests.size(); i > 0; i--) {
+            Index index = i - 1;
+            auto sent = tryTable->sentTypes[index];
+            if (sent == Type::none) {
+              continue;
+            }
+            auto dest = tryTable->catchDests[index];
+            auto* target = findBreakTarget(dest);
+            // Use the destination's own type where it has one, so that we
+            // share a single temp local with any explicit brs to it (which
+            // use findBreakTarget(..)->type as well).
+            Type destType = target->type.isConcrete() ? target->type : sent;
+            Index temp = getTempForBreakTarget(dest, destType);
+            Name caught = labelManager->getUnique("flatten-try-table-catch$");
+            auto* caughtBlock = builder.makeBlock(caught, items, sent);
+            tryTable->catchDests[index] = caught;
+            items = {builder.makeLocalSet(temp, caughtBlock),
+                     builder.makeBreak(dest)};
+          }
+          wrapped = builder.makeBlock(escape, items);
+        }
+
+        if (type.isConcrete()) {
+          // the whole try_table (and its wrapper) is now a prelude
+          ourPreludes.push_back(wrapped);
+          replaceCurrent(rep);
+        } else {
+          replaceCurrent(wrapped);
+        }
+
       } else {
         WASM_UNREACHABLE("unexpected expr type");
       }
@@ -333,7 +442,7 @@ struct Flatten
       }
     }
 
-    if (curr->is<BrOn>() || curr->is<TryTable>()) {
+    if (curr->is<BrOn>()) {
       Fatal() << "Unsupported instruction for Flatten: "
               << getExpressionName(curr);
     }
@@ -380,6 +489,9 @@ struct Flatten
     // Flatten can generate blocks within 'catch', making pops invalid. Fix them
     // up.
     EHUtils::handleBlockNestedPops(curr, *getModule());
+
+    // Labels are per-function, so do not carry a manager over to the next one.
+    labelManager.reset();
   }
 
 private:
