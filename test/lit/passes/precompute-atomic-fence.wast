@@ -7,7 +7,10 @@
 ;; atomic_thread_fence(memory_order_seq_cst) and musl's a_barrier() are
 ;; lowered by LLVM to exactly this instruction). Precompute must keep it,
 ;; including when it sits inside an otherwise-constant expression, and so must
-;; the default optimization pipeline that runs Precompute.
+;; the default optimization pipeline that runs Precompute. The $fold-* functions
+;; are the positive control: constant arithmetic must still fold, both alone
+;; and next to a fence, so the fence survives because it is a fence and not
+;; because folding stopped working.
 
 ;; RUN: wasm-opt %s --enable-threads --precompute -S -o - | filecheck %s
 ;; RUN: wasm-opt %s --enable-threads --precompute-propagate -S -o - | filecheck %s --check-prefix=PROP
@@ -31,6 +34,15 @@
   ;; PROP:      (export "store-fence-store" (func $store-fence-store))
   ;; O2:      (export "store-fence-store" (func $store-fence-store))
   (export "store-fence-store" (func $store-fence-store))
+  ;; CHECK:      (export "fold-alone" (func $fold-alone))
+  ;; PROP:      (export "fold-alone" (func $fold-alone))
+  ;; O2:      (export "fold-alone" (func $fold-alone))
+  (export "fold-alone" (func $fold-alone))
+  ;; CHECK:      (export "fold-beside-fence" (func $fold-beside-fence))
+  ;; PROP:      (export "fold-beside-fence" (func $fold-beside-fence))
+  ;; O2:      (export "fold-beside-fence" (func $fold-beside-fence))
+  (export "fold-beside-fence" (func $fold-beside-fence))
+
 
   ;; CHECK:      (func $lone-fence
   ;; CHECK-NEXT:  (atomic.fence)
@@ -106,6 +118,44 @@
     (i32.store
       (i32.const 4)
       (i32.const 1)
+    )
+  )
+
+  ;; CHECK:      (func $fold-alone (result i32)
+  ;; CHECK-NEXT:  (i32.const 43)
+  ;; CHECK-NEXT: )
+  ;; PROP:      (func $fold-alone (result i32)
+  ;; PROP-NEXT:  (i32.const 43)
+  ;; PROP-NEXT: )
+  ;; O2:      (func $fold-alone (result i32)
+  ;; O2-NEXT:  (i32.const 43)
+  ;; O2-NEXT: )
+  (func $fold-alone (result i32)
+    (i32.add
+      (i32.const 40)
+      (i32.const 3)
+    )
+  )
+
+  ;; CHECK:      (func $fold-beside-fence (result i32)
+  ;; CHECK-NEXT:  (atomic.fence)
+  ;; CHECK-NEXT:  (i32.const 48)
+  ;; CHECK-NEXT: )
+  ;; PROP:      (func $fold-beside-fence (result i32)
+  ;; PROP-NEXT:  (atomic.fence)
+  ;; PROP-NEXT:  (i32.const 48)
+  ;; PROP-NEXT: )
+  ;; O2:      (func $fold-beside-fence (result i32)
+  ;; O2-NEXT:  (atomic.fence)
+  ;; O2-NEXT:  (i32.const 48)
+  ;; O2-NEXT: )
+  (func $fold-beside-fence (result i32)
+    (block (result i32)
+      (atomic.fence)
+      (i32.mul
+        (i32.const 6)
+        (i32.const 8)
+      )
     )
   )
 )
