@@ -3124,6 +3124,11 @@ public:
   }
   Flow visitAtomicWait(AtomicWait* curr) { return Flow(NONCONSTANT_FLOW); }
   Flow visitAtomicNotify(AtomicNotify* curr) { return Flow(NONCONSTANT_FLOW); }
+  // A fence produces no value and the (single-threaded) base interpreter can
+  // execute it as a no-op, but it orders memory accesses with respect to other
+  // threads. Constant evaluation is used to *replace* code (e.g. by
+  // Precompute), so treating the fence as a constant no-op would delete it.
+  Flow visitAtomicFence(AtomicFence* curr) { return Flow(NONCONSTANT_FLOW); }
   Flow visitStructWait(StructWait* curr) { return Flow(NONCONSTANT_FLOW); }
   Flow visitWaitqueueNew(WaitqueueNew* curr) { return Flow(NONCONSTANT_FLOW); }
   Flow visitWaitqueueNotify(WaitqueueNotify* curr) {
