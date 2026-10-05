@@ -26,22 +26,25 @@
 //
 
 #include "abi/stack.h"
+#include "asmjs/shared-constants.h"
 #include "cfg/liveness-traversal.h"
+#include "ir/names.h"
 #include "pass.h"
 #include "wasm-builder.h"
 #include "wasm.h"
 
 namespace wasm {
 
-struct SpillPointers
-  : public WalkerPass<LivenessWalker<SpillPointers, Visitor<SpillPointers>>> {
+struct SpillPointersInFunctions
+  : public WalkerPass<
+      LivenessWalker<SpillPointersInFunctions, Visitor<SpillPointersInFunctions>>> {
   bool isFunctionParallel() override { return true; }
 
   // Adds writes to memory.
   bool addsEffects() override { return true; }
 
   std::unique_ptr<Pass> create() override {
-    return std::make_unique<SpillPointers>();
+    return std::make_unique<SpillPointersInFunctions>();
   }
 
   // a mapping of the pointers to all the spillable things. We need to know
@@ -204,6 +207,55 @@ struct SpillPointers
     block->list.push_back(call);
     block->finalize();
     *origin = block;
+  }
+};
+
+// firebox#S7E: never guess the stack pointer in a PIC module.
+//
+// In a dylink module the C stack pointer is the `env.__stack_pointer` import,
+// and wasm-ld only emits that import when some function in the module has a
+// shadow-stack frame. A module without one (a small C extension whose
+// functions keep everything in wasm locals - which is exactly the module that
+// most needs spilling) has no such import, and ABI::getStackPointerGlobal then
+// falls back to "the first defined global". In a PIC module that is an
+// unrelated global (a GOT entry, __tls_base, ...), so the spill frames would
+// be carved out of whatever address it holds: a wrong answer, not an error.
+// Add the import instead, so the fallback is never reached. Non-PIC modules
+// keep the upstream behavior.
+//
+// This is a module-level step, and a function-parallel pass has no place to
+// run one (PassRunner calls runOnFunction directly), so the registered pass is
+// a module pass that prepares the import and then runs the function-parallel
+// worker in a nested runner.
+struct SpillPointers : public Pass {
+  // Adds writes to memory.
+  bool addsEffects() override { return true; }
+
+  void run(Module* module) override {
+    ensureStackPointerImport(*module);
+    PassRunner runner(module, getPassOptions());
+    runner.setIsNested(true);
+    runner.add(std::make_unique<SpillPointersInFunctions>());
+    runner.run();
+  }
+
+  static void ensureStackPointerImport(Module& wasm) {
+    if (!wasm.dylinkSection || wasm.memories.empty()) {
+      return;
+    }
+    for (auto& global : wasm.globals) {
+      if (global->imported() && global->base == STACK_POINTER) {
+        return;
+      }
+    }
+    auto global =
+      Builder::makeGlobal(Names::getValidGlobalName(wasm, STACK_POINTER),
+                          wasm.memories[0]->addressType,
+                          nullptr,
+                          Builder::Mutable);
+    global->module = ENV;
+    global->base = STACK_POINTER;
+    wasm.addGlobal(std::move(global));
   }
 };
 

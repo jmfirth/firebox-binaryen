@@ -1,0 +1,25 @@
+# firebox#S7E: --spill-pointers on a PIC (dylink.0) module that has no
+# `env.__stack_pointer` import must ADD the import. The generic fallback is
+# "the first defined global", which here is $unrelated - a global that has
+# nothing to do with the C stack - and carving spill frames out of it is a
+# silent wrong answer.
+#
+# `spill-pointers-dylink.test.wasm` is `wasm-tools parse` of:
+#
+#   (module
+#     (@dylink.0 (mem-info (memory 0 0) (table 0 0)))
+#     (import "env" "memory" (memory 1))
+#     (import "env" "use" (func $use (param i32)))
+#     (global $unrelated (mut i32) (i32.const 12345))
+#     (func $spill (export "spill") (param $x i32)
+#       (call $use (i32.const 0))
+#       (call $use (local.get $x))))
+#
+# Positive control for the NOT lines: the same pass with the import already
+# present is covered by test/passes/spill-pointers.wast.
+RUN: wasm-opt --enable-mutable-globals --spill-pointers %s.wasm -S -o - | filecheck %s
+
+CHECK: (import "env" "__stack_pointer" (global $__stack_pointer (mut i32)))
+CHECK: (global.set $__stack_pointer
+CHECK-NOT: (global.set $unrelated
+CHECK-NOT: (global.get $unrelated
